@@ -11,12 +11,6 @@ class AdminPanel extends StatefulWidget {
 }
 
 class _AdminPanelState extends State<AdminPanel> {
-  final int _limit = 10;
-  DocumentSnapshot? _lastDocument;
-  bool _isLoadingMore = false;
-  bool _hasMore = true;
-  List<Map<String, dynamic>> _issues = [];
-
   final List<String> _departments = [
     'All',
     'PWD',
@@ -26,55 +20,6 @@ class _AdminPanelState extends State<AdminPanel> {
     'JKFD',
   ];
   String _selectedDept = 'All';
-
-  @override
-  void initState() {
-    super.initState();
-    _fetchIssues();
-  }
-
-  Future<void> _fetchIssues({bool loadMore = false}) async {
-    if (_isLoadingMore || (!_hasMore && loadMore)) return;
-
-    setState(() {
-      _isLoadingMore = true;
-    });
-
-    Query query = FirebaseFirestore.instance
-        .collection('in_progress_issues')
-        .orderBy('createdAt', descending: true)
-        .limit(_limit);
-
-    if (_selectedDept != 'All') {
-      query = query.where('department_assigned', isEqualTo: _selectedDept);
-    }
-
-    if (loadMore && _lastDocument != null) {
-      query = query.startAfterDocument(_lastDocument!);
-    }
-
-    final snapshot = await query.get();
-
-    final newData = snapshot.docs.map((doc) {
-      final data = doc.data() as Map<String, dynamic>;
-      data['status'] = data['status'] ?? 'In Progress';
-      data['department_assigned'] = data['department_assigned'] ?? 'Unassigned';
-      return data;
-    }).toList();
-
-    setState(() {
-      if (loadMore) {
-        _issues.addAll(newData);
-      } else {
-        _issues = newData;
-      }
-      _lastDocument = snapshot.docs.isNotEmpty
-          ? snapshot.docs.last
-          : _lastDocument;
-      _hasMore = snapshot.docs.length == _limit;
-      _isLoadingMore = false;
-    });
-  }
 
   String _formatTimestamp(dynamic timestamp) {
     if (timestamp == null) return '';
@@ -98,6 +43,44 @@ class _AdminPanelState extends State<AdminPanel> {
         context,
       ).showSnackBar(const SnackBar(content: Text('Could not open the map.')));
     }
+  }
+
+  Future<void> _markAsResolved(DocumentSnapshot doc) async {
+    try {
+      final data = doc.data() as Map<String, dynamic>;
+      await FirebaseFirestore.instance.collection('completed_issues').add({
+        ...data,
+        'status': 'Resolved',
+        'resolvedAt': FieldValue.serverTimestamp(),
+      });
+      await doc.reference.delete();
+    } catch (e) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  Future<void> _deleteIssue(DocumentSnapshot doc) async {
+    try {
+      await doc.reference.delete();
+    } catch (e) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  Stream<QuerySnapshot> _issueStream() {
+    final baseQuery = FirebaseFirestore.instance
+        .collection('in_progress_issues')
+        .orderBy('createdAt', descending: true);
+
+    if (_selectedDept == 'All') return baseQuery.snapshots();
+
+    return baseQuery
+        .where('department_assigned', isEqualTo: _selectedDept)
+        .snapshots();
   }
 
   @override
@@ -126,10 +109,7 @@ class _AdminPanelState extends State<AdminPanel> {
                   onTap: () {
                     setState(() {
                       _selectedDept = dept;
-                      _lastDocument = null;
-                      _hasMore = true;
                     });
-                    _fetchIssues();
                   },
                   child: Container(
                     padding: const EdgeInsets.symmetric(
@@ -155,214 +135,237 @@ class _AdminPanelState extends State<AdminPanel> {
             ),
           ),
 
-          // List of issues
+          // Realtime Stream Builder
           Expanded(
-            child: NotificationListener<ScrollNotification>(
-              onNotification: (scrollInfo) {
-                if (_hasMore &&
-                    !_isLoadingMore &&
-                    scrollInfo.metrics.pixels ==
-                        scrollInfo.metrics.maxScrollExtent) {
-                  _fetchIssues(loadMore: true);
+            child: StreamBuilder<QuerySnapshot>(
+              stream: _issueStream(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
                 }
-                return false;
-              },
-              child: _issues.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'No issues found.',
-                        style: TextStyle(color: Colors.white70),
-                      ),
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.all(20),
-                      itemCount: _issues.length + (_hasMore ? 1 : 0),
-                      itemBuilder: (context, index) {
-                        if (index >= _issues.length) {
-                          return const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 24),
-                            child: Center(child: CircularProgressIndicator()),
-                          );
-                        }
 
-                        final data = _issues[index];
-                        final imageUrl = data['imageUrl']?.toString();
-                        final caption = data['caption'] ?? '';
-                        final createdAt = data['createdAt'];
-                        final location =
-                            data['location'] as Map<String, dynamic>?;
-                        final lat = location?['lat']?.toDouble();
-                        final long = location?['long']?.toDouble();
-                        final department = data['department_assigned'];
-                        final status = data['status'];
+                if (snapshot.hasError) {
+                  return const Center(
+                    child: Text(
+                      'Error fetching data.',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                  );
+                }
 
-                        return Center(
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 700),
-                            child: Container(
-                              margin: const EdgeInsets.only(bottom: 24),
-                              decoration: BoxDecoration(
-                                color: Colors.black,
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(color: Colors.grey[850]!),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  if (imageUrl != null && imageUrl.isNotEmpty)
-                                    ClipRRect(
-                                      borderRadius: const BorderRadius.vertical(
-                                        top: Radius.circular(16),
-                                      ),
-                                      child: SizedBox(
-                                        height: 300,
-                                        width: double.infinity,
-                                        child: Image.network(
-                                          imageUrl,
-                                          fit: BoxFit.cover,
-                                          loadingBuilder:
-                                              (
-                                                context,
-                                                child,
-                                                loadingProgress,
-                                              ) {
-                                                if (loadingProgress == null)
-                                                  return child;
-                                                return Container(
-                                                  color: Colors.grey[900],
-                                                  child: const Center(
-                                                    child:
-                                                        CircularProgressIndicator(),
-                                                  ),
-                                                );
-                                              },
-                                          errorBuilder: (_, __, ___) =>
-                                              Container(
-                                                color: Colors.grey[900],
-                                                child: const Center(
-                                                  child: Icon(
-                                                    Icons.broken_image,
-                                                    color: Colors.white38,
-                                                  ),
-                                                ),
+                final docs = snapshot.data?.docs ?? [];
+
+                if (docs.isEmpty) {
+                  return const Center(
+                    child: Text(
+                      'No issues found.',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                  );
+                }
+
+                return ListView.builder(
+                  padding: const EdgeInsets.all(20),
+                  itemCount: docs.length,
+                  itemBuilder: (context, index) {
+                    final doc = docs[index];
+                    final data = doc.data() as Map<String, dynamic>;
+
+                    final imageUrl = data['imageUrl']?.toString();
+                    final caption = data['caption'] ?? '';
+                    final createdAt = data['createdAt'];
+                    final location = data['location'] as Map<String, dynamic>?;
+                    final lat = location?['lat']?.toDouble();
+                    final long = location?['long']?.toDouble();
+                    final department =
+                        data['department_assigned'] ?? 'Unassigned';
+                    final status = data['status'] ?? 'In Progress';
+
+                    return Center(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 700),
+                        child: Container(
+                          margin: const EdgeInsets.only(bottom: 24),
+                          decoration: BoxDecoration(
+                            color: Colors.black,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.grey[850]!),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (imageUrl != null && imageUrl.isNotEmpty)
+                                ClipRRect(
+                                  borderRadius: const BorderRadius.vertical(
+                                    top: Radius.circular(16),
+                                  ),
+                                  child: AspectRatio(
+                                    aspectRatio: 4 / 3,
+                                    child: Image.network(
+                                      imageUrl,
+                                      fit: BoxFit.cover,
+                                      loadingBuilder:
+                                          (context, child, progress) {
+                                            if (progress == null) return child;
+                                            return Container(
+                                              color: Colors.grey[900],
+                                              child: const Center(
+                                                child:
+                                                    CircularProgressIndicator(),
                                               ),
+                                            );
+                                          },
+                                      errorBuilder: (_, __, ___) => Container(
+                                        color: Colors.grey[900],
+                                        child: const Center(
+                                          child: Icon(
+                                            Icons.broken_image,
+                                            color: Colors.white38,
+                                          ),
                                         ),
                                       ),
                                     ),
-                                  Padding(
-                                    padding: const EdgeInsets.all(16),
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
+                                  ),
+                                ),
+                              Padding(
+                                padding: const EdgeInsets.all(16),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
                                       children: [
-                                        Row(
-                                          children: [
-                                            Text(
-                                              _formatTimestamp(createdAt),
-                                              style: const TextStyle(
-                                                color: Colors.white60,
-                                                fontSize: 12,
-                                              ),
-                                            ),
-                                            const Spacer(),
-                                            Chip(
-                                              label: Text(
-                                                status,
-                                                style: const TextStyle(
-                                                  color: Colors.white,
-                                                ),
-                                              ),
-                                              backgroundColor: Colors.orange,
-                                              visualDensity:
-                                                  VisualDensity.compact,
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal: 8,
-                                                  ),
-                                            ),
-                                          ],
+                                        Text(
+                                          _formatTimestamp(createdAt),
+                                          style: const TextStyle(
+                                            color: Colors.white60,
+                                            fontSize: 12,
+                                          ),
                                         ),
-                                        const SizedBox(height: 10),
-                                        if (caption.isNotEmpty)
-                                          Text(
-                                            caption,
+                                        const Spacer(),
+                                        Chip(
+                                          label: Text(
+                                            status,
                                             style: const TextStyle(
                                               color: Colors.white,
-                                              fontSize: 14.5,
-                                              height: 1.5,
                                             ),
                                           ),
-                                        const SizedBox(height: 10),
-                                        Row(
-                                          children: [
-                                            const Icon(
-                                              Icons.apartment,
-                                              size: 16,
-                                              color: Colors.deepPurpleAccent,
-                                            ),
-                                            const SizedBox(width: 6),
-                                            Expanded(
-                                              child: Text(
-                                                department,
-                                                style: const TextStyle(
-                                                  color: Colors.white70,
-                                                  fontSize: 13,
-                                                ),
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                            ),
-                                            if (lat != null && long != null)
-                                              InkWell(
-                                                onTap: () =>
-                                                    _openMap(lat, long),
-                                                child: Container(
-                                                  padding:
-                                                      const EdgeInsets.symmetric(
-                                                        horizontal: 10,
-                                                        vertical: 4,
-                                                      ),
-                                                  decoration: BoxDecoration(
-                                                    color: Colors
-                                                        .deepPurpleAccent
-                                                        .withOpacity(0.15),
-                                                    borderRadius:
-                                                        BorderRadius.circular(
-                                                          30,
-                                                        ),
-                                                  ),
-                                                  child: const Row(
-                                                    children: [
-                                                      Icon(
-                                                        Icons.location_pin,
-                                                        size: 16,
-                                                        color: Colors
-                                                            .deepPurpleAccent,
-                                                      ),
-                                                      SizedBox(width: 4),
-                                                      Text(
-                                                        "Map",
-                                                        style: TextStyle(
-                                                          color: Colors
-                                                              .deepPurpleAccent,
-                                                          fontSize: 12.5,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ),
-                                              ),
-                                          ],
+                                          backgroundColor: Colors.orange,
+                                          visualDensity: VisualDensity.compact,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                          ),
                                         ),
                                       ],
                                     ),
-                                  ),
-                                ],
+                                    const SizedBox(height: 10),
+                                    if (caption.isNotEmpty)
+                                      Text(
+                                        caption,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 14.5,
+                                          height: 1.5,
+                                        ),
+                                      ),
+                                    const SizedBox(height: 10),
+                                    Row(
+                                      children: [
+                                        const Icon(
+                                          Icons.apartment,
+                                          size: 16,
+                                          color: Colors.deepPurpleAccent,
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Expanded(
+                                          child: Text(
+                                            department,
+                                            style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 13,
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                        if (lat != null && long != null)
+                                          InkWell(
+                                            onTap: () => _openMap(lat, long),
+                                            child: Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 10,
+                                                    vertical: 4,
+                                                  ),
+                                              decoration: BoxDecoration(
+                                                color: Colors.deepPurpleAccent
+                                                    .withOpacity(0.15),
+                                                borderRadius:
+                                                    BorderRadius.circular(30),
+                                              ),
+                                              child: const Row(
+                                                children: [
+                                                  Icon(
+                                                    Icons.location_pin,
+                                                    size: 16,
+                                                    color:
+                                                        Colors.deepPurpleAccent,
+                                                  ),
+                                                  SizedBox(width: 4),
+                                                  Text(
+                                                    "Map",
+                                                    style: TextStyle(
+                                                      color: Colors
+                                                          .deepPurpleAccent,
+                                                      fontSize: 12.5,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 10),
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.end,
+                                      children: [
+                                        TextButton.icon(
+                                          onPressed: () => _markAsResolved(doc),
+                                          icon: const Icon(
+                                            Icons.check_circle_outline,
+                                            color: Colors.green,
+                                          ),
+                                          label: const Text(
+                                            'Resolve',
+                                            style: TextStyle(
+                                              color: Colors.green,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        TextButton.icon(
+                                          onPressed: () => _deleteIssue(doc),
+                                          icon: const Icon(
+                                            Icons.delete_outline,
+                                            color: Colors.red,
+                                          ),
+                                          label: const Text(
+                                            'Delete',
+                                            style: TextStyle(color: Colors.red),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ),
+                            ],
                           ),
-                        );
-                      },
-                    ),
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
             ),
           ),
         ],
